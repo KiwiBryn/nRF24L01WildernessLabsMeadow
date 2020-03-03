@@ -1,787 +1,765 @@
 ﻿namespace Radios.RF24
 {
-    using System;
-    using System.Diagnostics;
-    using System.Text;
-    using System.Threading;
-    using System.Threading.Tasks;
-    using Windows.Devices.Gpio;
-    using Windows.Devices.Spi;
+   using System;
+   using System.Diagnostics;
+   using System.Text;
+   using System.Threading;
+   using System.Threading.Tasks;
+   using Meadow.Hardware;
 
-    /// <summary>
-    ///   Driver class for Nordic nRF24L01+ tranceiver
-    /// </summary>
-    public class RF24
-    {
-        #region Delegates
-        
-        /// <summary>
-        ///   Generic Event Handler for events
-        /// </summary>
-        public delegate void EventHandler();
+   /// <summary>
+   ///   Driver class for Nordic nRF24L01+ transceiver
+   /// </summary>
+   public class RF24
+   {
+      #region Delegates
 
-        /// <summary>
-        ///   Event Handler for when data is received
-        /// </summary>
-        /// <param name="data"></param>
-        public delegate void OnDataRecievedHandler(byte[] data);
+      /// <summary>
+      ///   Generic Event Handler for events
+      /// </summary>
+      public delegate void EventHandler();
 
-        #endregion Delegates
+      /// <summary>
+      ///   Event Handler for when data is received
+      /// </summary>
+      /// <param name="data"></param>
+      public delegate void OnDataRecievedHandler(byte[] data);
 
-        #region Events
+      #endregion Delegates
 
-        /// <summary>
-        ///   Occurs when data packet has been received
-        /// </summary>
-        public event OnDataRecievedHandler OnDataReceived = delegate { };
+      #region Events
 
-        /// <summary>
-        ///   Occurs when ack has been received for send packet
-        /// </summary>
-        public event EventHandler OnTransmitSuccess = delegate { };
+      /// <summary>
+      ///   Occurs when data packet has been received
+      /// </summary>
+      public event OnDataRecievedHandler OnDataReceived = delegate { };
 
-        /// <summary>
-        ///   Occurs when no ack has been received for send packet
-        /// </summary>
-        public event EventHandler OnTransmitFailed = delegate { };
+      /// <summary>
+      ///   Occurs when ack has been received for send packet
+      /// </summary>
+      public event EventHandler OnTransmitSuccess = delegate { };
 
-        #endregion Events
+      /// <summary>
+      ///   Occurs when no ack has been received for send packet
+      /// </summary>
+      public event EventHandler OnTransmitFailed = delegate { };
 
-        #region Properties
+      #endregion Events
 
-        /// <summary>
-        ///   Gets a value indicating whether module is enabled (RX or TX mode). Setting to true will enable the module,
-        ///   false will disable it.
-        /// </summary>
-        public bool IsEnabled
-        {
-            get
+      #region Properties
+
+      /// <summary>
+      ///   Gets a value indicating whether module is enabled (RX or TX mode). Setting to true will enable the module,
+      ///   false will disable it.
+      /// </summary>
+      public bool IsEnabled
+      {
+         get
+         {
+            return _cePin.State;
+         }
+         set
+         {
+            _enabled = value;
+            _cePin.State = _enabled;
+         }
+      }
+
+      /// <summary>
+      ///   Indicates whether or not the module is initialized
+      /// </summary>
+      public bool IsInitialized
+      {
+         get;
+         private set;
+      }
+
+      /// <summary>
+      ///   The channel that the radio will be operating on. If the channel is not supported, an
+      ///   ArgumentOutOfRangeException is thrown.
+      /// </summary>
+      public byte Channel
+      {
+         get
+         {
+            return (byte)(Execute(Commands.R_REGISTER, Registers.RF_CH, new byte[1])[1] & 0x7F);
+         }
+         set
+         {
+            if (value > MAX_CHANNEL)
             {
-                return _cePin.Read() == GpioPinValue.High ? true : false;
+               throw new ArgumentOutOfRangeException("Channel", value, "Channel cannot be greater than " + MAX_CHANNEL);
             }
-            set
-            {
-                _enabled = value;
-                _cePin.Write(value ? GpioPinValue.High : GpioPinValue.Low);
-            }
-        }
 
-        /// <summary>
-        ///   Indicates whether or not the module is initialized
-        /// </summary>
-        public bool IsInitialized
-        {
-            get;
-            private set;
-        }
-
-        /// <summary>
-        ///   The channel that the radio will be operating on. If the channel is not supported, an
-        ///   ArgumentOutOfRangeException is thrown.
-        /// </summary>
-        public byte Channel
-        {
-            get
-            {
-                return (byte)(Execute(Commands.R_REGISTER, Registers.RF_CH, new byte[1])[1] & 0x7F);
-            }
-            set
-            {
-                if (value > MAX_CHANNEL)
-                {
-                    throw new ArgumentOutOfRangeException("Channel", value, "Channel cannot be greater than " + MAX_CHANNEL);
-                }
-                
-                // Set radio channel
-                Execute(Commands.W_REGISTER, Registers.RF_CH,
-                        new[]
-                        {
+            // Set radio channel
+            Execute(Commands.W_REGISTER, Registers.RF_CH,
+                    new[]
+                    {
                             (byte) (value & 0x7F) // channel is 7 bits
-                        });
-            }
-        }
+                    });
+         }
+      }
 
-        /// <summary>
-        ///   Gets the module radio frequency [MHz]
-        /// </summary>
-        public int Frequency
-        {
-            get
+      /// <summary>
+      ///   Gets the module radio frequency [MHz]
+      /// </summary>
+      public int Frequency
+      {
+         get
+         {
+            return 2400 + Channel;
+         }
+      }
+
+      /// <summary>
+      ///   The DataRate for the module.
+      /// </summary>
+      public DataRate DataRate
+      {
+         get
+         {
+            byte regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1];
+
+            if ((regValue & (byte)(1 << Bits.RF_DR_LOW)) > 0)
             {
-                return 2400 + Channel;
+               return DataRate.DR250Kbps;
             }
-        }
-
-        /// <summary>
-        ///   The DataRate for the module.
-        /// </summary>
-        public DataRate DataRate
-        {
-            get
+            else if ((regValue & (byte)(1 << Bits.RF_DR_HIGH)) > 0)
             {
-                byte regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1];
-                
-                if ((regValue & (byte)(1 << Bits.RF_DR_LOW)) > 0)
-                {
-                    return DataRate.DR250Kbps;
-                }
-                else if ((regValue & (byte)(1 << Bits.RF_DR_HIGH)) > 0)
-                {
-                    return DataRate.DR2Mbps;
-                }
-                else
-                {
-                    return DataRate.DR1Mbps;
-                }
+               return DataRate.DR2Mbps;
             }
-            set
+            else
             {
-                var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1];
-
-                switch (value)
-                {
-                    case DataRate.DR1Mbps:
-                        regValue &= (byte)~(1 << Bits.RF_DR_LOW);  // 0
-                        regValue &= (byte)~(1 << Bits.RF_DR_HIGH); // 0
-                        break;
-
-                    case DataRate.DR2Mbps:
-                        regValue &= (byte)~(1 << Bits.RF_DR_LOW);  // 0
-                        regValue |= (byte)(1 << Bits.RF_DR_HIGH);  // 1
-                        break;
-
-                    case DataRate.DR250Kbps:
-                        regValue |= (byte)(1 << Bits.RF_DR_LOW);   // 1
-                        regValue &= (byte)~(1 << Bits.RF_DR_HIGH); // 0
-                        break;
-
-                    default:
-                        throw new ArgumentOutOfRangeException("DataRate", value, "An invalid DataRate was specified");
-                }
-
-                Execute(Commands.W_REGISTER, Registers.RF_SETUP, new[] { regValue });
+               return DataRate.DR1Mbps;
             }
-        }
+         }
+         set
+         {
+            var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1];
 
-        /// <summary>
-        ///   Enables or disables the Dynamic Payload feature for the radio
-        /// </summary>
-        public bool IsDynamicPayload
-        {
-            get
+            switch (value)
             {
-                var regValue = Execute(Commands.R_REGISTER, Registers.FEATURE, new byte[1])[1];
-                return ((regValue & (1 << Bits.EN_DPL)) > 0) && ((regValue & (1 << Bits.EN_ACK_PAY)) > 0);
+               case DataRate.DR1Mbps:
+                  regValue &= (byte)~(1 << Bits.RF_DR_LOW);  // 0
+                  regValue &= (byte)~(1 << Bits.RF_DR_HIGH); // 0
+                  break;
+
+               case DataRate.DR2Mbps:
+                  regValue &= (byte)~(1 << Bits.RF_DR_LOW);  // 0
+                  regValue |= (byte)(1 << Bits.RF_DR_HIGH);  // 1
+                  break;
+
+               case DataRate.DR250Kbps:
+                  regValue |= (byte)(1 << Bits.RF_DR_LOW);   // 1
+                  regValue &= (byte)~(1 << Bits.RF_DR_HIGH); // 0
+                  break;
+
+               default:
+                  throw new ArgumentOutOfRangeException("DataRate", value, "An invalid DataRate was specified");
             }
-            set
-            {
-                uint enable = value ? 1u : 0u;
-                
-                // Enable dynamic payload length
-                Execute(Commands.W_REGISTER, Registers.FEATURE,
-                        new[]
-                            {
+
+            Execute(Commands.W_REGISTER, Registers.RF_SETUP, new[] { regValue });
+         }
+      }
+
+      /// <summary>
+      ///   Enables or disables the Dynamic Payload feature for the radio
+      /// </summary>
+      public bool IsDynamicPayload
+      {
+         get
+         {
+            var regValue = Execute(Commands.R_REGISTER, Registers.FEATURE, new byte[1])[1];
+            return ((regValue & (1 << Bits.EN_DPL)) > 0) && ((regValue & (1 << Bits.EN_ACK_PAY)) > 0);
+         }
+         set
+         {
+            uint enable = value ? 1u : 0u;
+
+            // Enable dynamic payload length
+            Execute(Commands.W_REGISTER, Registers.FEATURE,
+                    new[]
+                        {
                             (byte) (enable << Bits.EN_DPL |
                                     enable << Bits.EN_ACK_PAY)
-                            });
+                        });
 
-                // Set dynamic payload length for pipes
-                Execute(Commands.W_REGISTER, Registers.DYNPD,
-                        new[]
-                            {
+            // Set dynamic payload length for pipes
+            Execute(Commands.W_REGISTER, Registers.DYNPD,
+                    new[]
+                        {
                             (byte) (enable << Bits.DPL_P0 |
                                     enable << Bits.DPL_P1 |
                                     enable << Bits.DPL_P2 |
                                     enable << Bits.DPL_P3 |
                                     enable << Bits.DPL_P4 |
                                     enable << Bits.DPL_P5)
-                            });
-            }
-        }
+                        });
+         }
+      }
 
-        /// <summary>
-        ///   Enables or disables the Auto Ack feature for the radio
-        /// </summary>
-        public bool IsAutoAcknowledge
-        {
-            get
-            {
-                var regValue = Execute(Commands.R_REGISTER, Registers.EN_AA, new byte[1])[1];
-                return (regValue & (
-                             (byte)(1 << Bits.ENAA_P0 |
-                                    1 << Bits.ENAA_P1 |
-                                    1 << Bits.ENAA_P2 |
-                                    1 << Bits.ENAA_P3 |
-                                    1 << Bits.ENAA_P4 |
-                                    1 << Bits.ENAA_P5))) > 0;
-            }
-            set
-            {
-                uint enable = value ? 1u : 0u;
+      /// <summary>
+      ///   Enables or disables the Auto Ack feature for the radio
+      /// </summary>
+      public bool IsAutoAcknowledge
+      {
+         get
+         {
+            var regValue = Execute(Commands.R_REGISTER, Registers.EN_AA, new byte[1])[1];
+            return (regValue & (
+                         (byte)(1 << Bits.ENAA_P0 |
+                                1 << Bits.ENAA_P1 |
+                                1 << Bits.ENAA_P2 |
+                                1 << Bits.ENAA_P3 |
+                                1 << Bits.ENAA_P4 |
+                                1 << Bits.ENAA_P5))) > 0;
+         }
+         set
+         {
+            uint enable = value ? 1u : 0u;
 
-                // Set auto-ack
-                Execute(Commands.W_REGISTER, Registers.EN_AA,
-                        new[]
-                            {
+            // Set auto-ack
+            Execute(Commands.W_REGISTER, Registers.EN_AA,
+                    new[]
+                        {
                             (byte) (enable << Bits.ENAA_P0 |
                                     enable << Bits.ENAA_P1 |
                                     enable << Bits.ENAA_P2 |
                                     enable << Bits.ENAA_P3 |
                                     enable << Bits.ENAA_P4 |
                                     enable << Bits.ENAA_P5)
-                            });
-            }
-        }
+                        });
+         }
+      }
 
-        /// <summary>
-        ///   Enables or disables the Dynamic Ack feature for the radio
-        /// </summary>
-        public bool IsDyanmicAcknowledge
-        {
-            get
-            {
-                var regValue = Execute(Commands.R_REGISTER, Registers.FEATURE, new byte[1])[1];
-                return (regValue & (1 << Bits.EN_DYN_ACK)) > 0;
-            }
-            set
-            {
-                uint enable = value ? 1u : 0u;
-                var regValue = Execute(Commands.R_REGISTER, Registers.FEATURE, new byte[1])[1];
-                
-                // Set dynamic-ack
-                Execute(Commands.W_REGISTER, Registers.FEATURE,
-                        new[]
-                            {
+      /// <summary>
+      ///   Enables or disables the Dynamic Ack feature for the radio
+      /// </summary>
+      public bool IsDyanmicAcknowledge
+      {
+         get
+         {
+            var regValue = Execute(Commands.R_REGISTER, Registers.FEATURE, new byte[1])[1];
+            return (regValue & (1 << Bits.EN_DYN_ACK)) > 0;
+         }
+         set
+         {
+            uint enable = value ? 1u : 0u;
+            var regValue = Execute(Commands.R_REGISTER, Registers.FEATURE, new byte[1])[1];
+
+            // Set dynamic-ack
+            Execute(Commands.W_REGISTER, Registers.FEATURE,
+                    new[]
+                        {
                             (byte) (enable << Bits.EN_DYN_ACK)
-                            });
-            }
-        }
+                        });
+         }
+      }
 
-        /// <summary>
-        ///   The power level for the radio.
-        /// </summary>
-        public PowerLevel PowerLevel
-        {
-            get
-            {
-                var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1] & 0xF8;
-                var newValue = (regValue - 1) >> 1;
-                return (PowerLevel)newValue;
-            }
-            set
-            {
-                var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1] & 0xF8;
+      /// <summary>
+      ///   The power level for the radio.
+      /// </summary>
+      public PowerLevel PowerLevel
+      {
+         get
+         {
+            var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1] & 0xF8;
+            var newValue = (regValue - 1) >> 1;
+            return (PowerLevel)newValue;
+         }
+         set
+         {
+            var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1] & 0xF8;
 
-                byte newValue = (byte)((byte)value << 1 + 1);
+            byte newValue = (byte)((byte)value << 1 + 1);
 
-                Execute(Commands.W_REGISTER, Registers.RF_SETUP,
-                        new[]
-                            {
+            Execute(Commands.W_REGISTER, Registers.RF_SETUP,
+                    new[]
+                        {
                             (byte) (newValue | regValue)
-                            });
-            }
-        }
+                        });
+         }
+      }
 
-        /// <summary>
-        ///   Enables or disables power to the radio
-        /// </summary>
-        public bool IsPowered
-        {
-            get
-            {
-                var regValue = Execute(Commands.R_REGISTER, Registers.CONFIG, new byte[1])[1];
-                return (regValue & (1 << Bits.PWR_UP)) > 0;
-            }
-            set
-            {
-                uint enable = value ? 1u : 0u;
-                var regValue = Execute(Commands.R_REGISTER, Registers.CONFIG, new byte[1])[1];
-                Execute(Commands.W_REGISTER, Registers.CONFIG,
-                        new[]
-                            {
+      /// <summary>
+      ///   Enables or disables power to the radio
+      /// </summary>
+      public bool IsPowered
+      {
+         get
+         {
+            var regValue = Execute(Commands.R_REGISTER, Registers.CONFIG, new byte[1])[1];
+            return (regValue & (1 << Bits.PWR_UP)) > 0;
+         }
+         set
+         {
+            uint enable = value ? 1u : 0u;
+            var regValue = Execute(Commands.R_REGISTER, Registers.CONFIG, new byte[1])[1];
+            Execute(Commands.W_REGISTER, Registers.CONFIG,
+                    new[]
+                        {
                             (byte) (regValue | (enable << Bits.PWR_UP))
-                            });
-            }
-        }
-
-        /// <summary>
-        ///   The address to be used for this radio. Must be between 3 and 5 bytes.
-        ///   Otherwise an ArgumentException is raised. 
-        /// </summary>
-        public byte[] Address
-        {
-            get
-            {
-                var read = Execute(Commands.R_REGISTER, (byte)AddressSlot.Zero, new byte[_slot0Address.Length]);
-                var result = new byte[read.Length - 1];
-                Array.Copy(read, 1, result, 0, result.Length);
-                return result;
-            }
-            set
-            {
-                AddressWidth.IsValid(value.Length);
-
-                Execute(Commands.W_REGISTER, Registers.SETUP_AW,
-                    new[]
-                        {
-                            AddressWidth.Get(value)
                         });
+         }
+      }
 
-                // Set module address
-                _slot0Address = value;
-                Execute(Commands.W_REGISTER, (byte)AddressSlot.Zero, value);
-            }
-        }
-
-        #endregion Properties
-
-        #region Public Members
-
-        /// <summary>
-        ///   Constructs a new RF24 object to represent this radio.
-        /// </summary>     
-        public RF24()
-        {
-            _transmitSuccessFlag = new ManualResetEvent(false);
-            _transmitFailedFlag = new ManualResetEvent(false);
-        }
-        
-        /// <summary>
-        ///   Initializes SPI connection and control pins
-        /// </summary>
-        /// <param name="chipEnablePin">
-        ///   Number representing the chip enable pin. This pin will be set to drive output
-        /// </param>
-        /// <param name="chipSelectLine">
-        ///   Number representing the chip select line. For RPi2, this is typically 0
-        /// </param>
-        /// <param name="interruptPin">
-        ///   Number representing the interrupt pin. This should be a Pull-up pin, and will drive Input
-        /// </param>
-        public void Initialize(byte chipEnablePin, byte chipSelectLine, byte interruptPin)
-        {
-            var gpio = GpioController.GetDefault();
-
-            if (gpio == null)
-            {
-                Debug.WriteLine("GPIO Initialization failed.");
-            }
-            else
-            {
-                _cePin = gpio.OpenPin(chipEnablePin);
-                _cePin.SetDriveMode(GpioPinDriveMode.Output);
-                _cePin.Write(GpioPinValue.Low);
-                
-                _irqPin = gpio.OpenPin((byte)interruptPin);
-                _irqPin.SetDriveMode(GpioPinDriveMode.InputPullUp);
-                _irqPin.Write(GpioPinValue.High);
-                _irqPin.ValueChanged += _irqPin_ValueChanged;
-            }
-            
-            try
-            {
-                var settings = new SpiConnectionSettings(chipSelectLine);
-                settings.ClockFrequency = 2000000;
-                settings.Mode = SpiMode.Mode0;
-
-                SpiController controller = SpiController.GetDefaultAsync().AsTask().GetAwaiter().GetResult();
-                _spiPort = controller.GetDevice(settings);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine("SPI Initialization failed. Exception: " + ex.Message);
-                return;
-            }
-
-            // Module reset time
-            Task.Delay(100).GetAwaiter().GetResult();
-
-            IsInitialized = true;
-
-            // Set reasonable default values
-            Address = Encoding.UTF8.GetBytes("NRF1");
-            DataRate = DataRate.DR2Mbps;
-            IsDynamicPayload = true;
-            IsAutoAcknowledge = true;
-
-            FlushReceiveBuffer();
-            FlushTransferBuffer();
-            ClearIrqMasks();
-            SetRetries(5, 60);
-
-            // Setup, CRC enabled, Power Up, PRX
-            SetReceiveMode();
-        }
-
-        /// <summary>
-        ///   Sets the delay time and count of retries if a transmission fails
-        /// </summary>
-        /// <param name="delay">
-        ///   How long to wait between each retry, in multiples of 250us, max is 15. 0 means 250us, 15 means 4000us.
-        /// </param>
-        /// <param name="count">
-        ///   How long to wait between each retry, in multiples of 250us, max is 15. 0 means 250us, 15 means 4000us.
-        /// </param>
-        public void SetRetries(byte delay, byte count)
-        {
-            Execute(Commands.W_REGISTER, Registers.SETUP_RETR,
-                    new[]
-                        {
-                            (byte) ((delay & 0x0F) << Bits.ARD |
-                                    (count & 0x0F) << Bits.ARC)
-                        });
-        }
-
-        /// <summary>
-        ///   Set one of 6 available module addresses
-        /// </summary>
-        /// <param name="slot">
-        ///   The slot to write the address to
-        /// </param>
-        /// <param name="address">
-        ///   The address to write. Must be between 3 and 5 bytes, otherwise an ArgumentException is thrown.
-        /// </param>
-        public void SetAddress(AddressSlot slot, byte[] address)
-        {
-            CheckIsInitialized();
-            AddressWidth.IsValid(address);
-            Execute(Commands.W_REGISTER, (byte)slot, address);
-
-            if (slot == AddressSlot.Zero)
-            {
-                _slot0Address = address;
-            }
-        }
-
-        /// <summary>
-        ///   Read 1 of 6 available module addresses
-        /// </summary>
-        /// <param name="slot">
-        ///   The slot to read from
-        /// </param>
-        /// <param name="width">
-        ///   The width, in bytes, of the address
-        /// </param>
-        /// <returns>byte[] representing the address</returns>
-        public byte[] GetAddress(AddressSlot slot, byte width)
-        {
-            CheckIsInitialized();
-            AddressWidth.IsValid(width);
-            var read = Execute(Commands.R_REGISTER, (byte)slot, new byte[width]);
+      /// <summary>
+      ///   The address to be used for this radio. Must be between 3 and 5 bytes.
+      ///   Otherwise an ArgumentException is raised. 
+      /// </summary>
+      public byte[] Address
+      {
+         get
+         {
+            var read = Execute(Commands.R_REGISTER, (byte)AddressSlot.Zero, new byte[_slot0Address.Length]);
             var result = new byte[read.Length - 1];
             Array.Copy(read, 1, result, 0, result.Length);
             return result;
-        }
+         }
+         set
+         {
+            AddressWidth.IsValid(value.Length);
 
-        /// <summary>
-        ///   Executes a command in NRF24L01+ (for details see module datasheet)
-        /// </summary>
-        /// <param name = "command">Command</param>
-        /// <param name = "addres">Register to write to or read from</param>
-        /// <param name = "data">Data to write or buffer to read to</param>
-        /// <returns>Response byte array. First byte is the status register</returns>
-        public byte[] Execute(byte command, byte addres, byte[] data)
-        {
-            CheckIsInitialized();
+            Execute(Commands.W_REGISTER, Registers.SETUP_AW,
+                new[]
+                    {
+                            AddressWidth.Get(value)
+                    });
 
-            // This command requires module to be in power down or standby mode
-            if (command == Commands.W_REGISTER)
-                IsEnabled = false;
+            // Set module address
+            _slot0Address = value;
+            Execute(Commands.W_REGISTER, (byte)AddressSlot.Zero, value);
+         }
+      }
 
-            // Create SPI Buffers with Size of Data + 1 (For Command)
-            var writeBuffer = new byte[data.Length + 1];
-            var readBuffer = new byte[data.Length + 1];
+      #endregion Properties
 
-            // Add command and adres to SPI buffer
-            writeBuffer[0] = (byte)(command | addres);
+      #region Public Members
 
-            // Add data to SPI buffer
-            Array.Copy(data, 0, writeBuffer, 1, data.Length);
+      /// <summary>
+      ///   Constructs a new RF24 object to represent this radio.
+      /// </summary>     
+      public RF24()
+      {
+         _transmitSuccessFlag = new ManualResetEvent(false);
+         _transmitFailedFlag = new ManualResetEvent(false);
+      }
 
-            // Do SPI Read/Write
-            _spiPort.TransferFullDuplex(writeBuffer, readBuffer);
+      /// <summary>
+      ///   Initializes SPI connection and control pins
+      /// </summary>
+      /// <param name="chipEnablePin">
+      ///   Number representing the chip enable pin. This pin will be set to drive output
+      /// </param>
+      /// <param name="chipSelectLine">
+      ///   Number representing the chip select line. For RPi2, this is typically 0
+      /// </param>
+      /// <param name="interruptPin">
+      ///   Number representing the interrupt pin. This should be a Pull-up pin, and will drive Input
+      /// </param>
+      public void Initialize(IIODevice device, ISpiBus spiBus, IPin chipEnablePin, IPin chipSelectLine, IPin interruptPin)
+      {
+         _SpiBus = spiBus;
 
-            // Enable module back if it was disabled
-            if (command == Commands.W_REGISTER && _enabled)
-                IsEnabled = true;
+         _cePin = device.CreateDigitalOutputPort(chipEnablePin, false);
 
-            // Return ReadBuffer
-            return readBuffer;
-        }
+         _csPin = device.CreateDigitalOutputPort(chipSelectLine, false);
 
-        /// <summary>
-        ///   Gets module basic status information
-        /// </summary>
-        /// <returns>Status object representing the current status of the radio</returns>
-        public Status GetStatus()
-        {
-            CheckIsInitialized();
+         _irqPin = device.CreateDigitalInputPort(interruptPin, InterruptMode.EdgeFalling, resistorMode: ResistorMode.PullUp);
+         _irqPin.Changed += InterruptGpioPin_ValueChanged;
 
-            var readBuffer = new byte[1];
-            _spiPort.TransferFullDuplex(new[] { Commands.NOP }, readBuffer);
+         // Module reset time
+         Task.Delay(100).GetAwaiter().GetResult();
 
-            return new Status(readBuffer[0]);
-        }
-                
-        /// <summary>
-        ///   Send bytes to given address. This is a non blocking method.
-        /// </summary>
-        /// <param name="address">
-        ///   Address to send bytes to
-        /// </param>
-        /// <param name="bytes">
-        ///   Bytes to be sent
-        /// </param>
-        /// <param name="acknowledge">
-        ///   Sets whether or not it is expected to receive an ack packet
-        /// </param>
-        public void SendTo(byte[] address, byte[] bytes, bool acknowledge = true)
-        {
-            // Chip enable low
+         IsInitialized = true;
+
+         // Set reasonable default values
+         Address = Encoding.UTF8.GetBytes("NRF1");
+         DataRate = DataRate.DR2Mbps;
+         IsDynamicPayload = true;
+         IsAutoAcknowledge = true;
+
+         FlushReceiveBuffer();
+         FlushTransferBuffer();
+         ClearIrqMasks();
+         SetRetries(5, 60);
+
+         // Setup, CRC enabled, Power Up, PRX
+         SetReceiveMode();
+      }
+
+      /// <summary>
+      ///   Sets the delay time and count of retries if a transmission fails
+      /// </summary>
+      /// <param name="delay">
+      ///   How long to wait between each retry, in multiples of 250us, max is 15. 0 means 250us, 15 means 4000us.
+      /// </param>
+      /// <param name="count">
+      ///   How long to wait between each retry, in multiples of 250us, max is 15. 0 means 250us, 15 means 4000us.
+      /// </param>
+      public void SetRetries(byte delay, byte count)
+      {
+         Execute(Commands.W_REGISTER, Registers.SETUP_RETR,
+                 new[]
+                     {
+                            (byte) ((delay & 0x0F) << Bits.ARD |
+                                    (count & 0x0F) << Bits.ARC)
+                     });
+      }
+
+      /// <summary>
+      ///   Set one of 6 available module addresses
+      /// </summary>
+      /// <param name="slot">
+      ///   The slot to write the address to
+      /// </param>
+      /// <param name="address">
+      ///   The address to write. Must be between 3 and 5 bytes, otherwise an ArgumentException is thrown.
+      /// </param>
+      public void SetAddress(AddressSlot slot, byte[] address)
+      {
+         CheckIsInitialized();
+         AddressWidth.IsValid(address);
+         Execute(Commands.W_REGISTER, (byte)slot, address);
+
+         if (slot == AddressSlot.Zero)
+         {
+            _slot0Address = address;
+         }
+      }
+
+      /// <summary>
+      ///   Read 1 of 6 available module addresses
+      /// </summary>
+      /// <param name="slot">
+      ///   The slot to read from
+      /// </param>
+      /// <param name="width">
+      ///   The width, in bytes, of the address
+      /// </param>
+      /// <returns>byte[] representing the address</returns>
+      public byte[] GetAddress(AddressSlot slot, byte width)
+      {
+         CheckIsInitialized();
+         AddressWidth.IsValid(width);
+         var read = Execute(Commands.R_REGISTER, (byte)slot, new byte[width]);
+         var result = new byte[read.Length - 1];
+         Array.Copy(read, 1, result, 0, result.Length);
+         return result;
+      }
+
+      /// <summary>
+      ///   Executes a command in NRF24L01+ (for details see module datasheet)
+      /// </summary>
+      /// <param name = "command">Command</param>
+      /// <param name = "addres">Register to write to or read from</param>
+      /// <param name = "data">Data to write or buffer to read to</param>
+      /// <returns>Response byte array. First byte is the status register</returns>
+      public byte[] Execute(byte command, byte addres, byte[] data)
+      {
+         CheckIsInitialized();
+
+         // This command requires module to be in power down or standby mode
+         if (command == Commands.W_REGISTER)
             IsEnabled = false;
 
-            // Setup PTX (Primary TX)
-            SetTransmitMode();
+         // Create SPI Buffers with Size of Data + 1 (For Command)
+         var writeBuffer = new byte[data.Length + 1];
+         var readBuffer = new byte[data.Length + 1];
 
-            // Write transmit address to TX_ADDR register. 
-            Execute(Commands.W_REGISTER, Registers.TX_ADDR, address);
+         // Add command and address to SPI buffer
+         writeBuffer[0] = (byte)(command | addres);
 
-            // Write transmit address to RX_ADDRESS_P0 (Pipe0) (For Auto ACK)
-            Execute(Commands.W_REGISTER, Registers.RX_ADDR_P0, address);
+         // Add data to SPI buffer
+         Array.Copy(data, 0, writeBuffer, 1, data.Length);
 
-            // Send payload
-            Execute(acknowledge ? Commands.W_TX_PAYLOAD : Commands.W_TX_PAYLOAD_NO_ACK, 0x00, bytes);
+         // Do SPI Read/Write
+         _SpiBus.ExchangeData(_csPin, ChipSelectMode.ActiveLow, writeBuffer, readBuffer);
 
-            // Pulse for CE -> starts the transmission.
+         // Enable module back if it was disabled
+         if (command == Commands.W_REGISTER && _enabled)
             IsEnabled = true;
-        }
 
-        /// <summary>
-        ///   Sends bytes to given address. This is a blocking method that returns true if data was
-        ///   received by the recipient or false if timeout occured.
-        /// </summary>
-        /// <param name="address">
-        ///   Address to send bytes to
-        /// </param>
-        /// <param name="bytes">
-        ///   Bytes to be sent
-        /// </param>
-        /// <param name="timeout">
-        ///   Timeout in milliseconds
-        /// </param>
-        /// <returns>true if data was received by the recipient, false otherwise</returns>
-        public bool SendTo(byte[] address, byte[] bytes, int timeout)
-        {
-            var startTime = DateTime.Now;
+         // Return ReadBuffer
+         return readBuffer;
+      }
 
-            while (true)
-            {
-                _transmitSuccessFlag.Reset();
-                _transmitFailedFlag.Reset();
+      /// <summary>
+      ///   Gets module basic status information
+      /// </summary>
+      /// <returns>Status object representing the current status of the radio</returns>
+      public Status GetStatus()
+      {
+         CheckIsInitialized();
 
-                SendTo(address, bytes);
+         var readBuffer = new byte[1];
+         _SpiBus.ExchangeData(_csPin, ChipSelectMode.ActiveLow, new[] { Commands.NOP }, readBuffer);
 
-                if (WaitHandle.WaitAny(new[] { _transmitSuccessFlag, _transmitFailedFlag }, 200) == 0)
-                    return true;
+         return new Status(readBuffer[0]);
+      }
 
-                if (DateTime.Now.CompareTo(startTime.AddMilliseconds(timeout)) > 0)
-                    return false;
+      /// <summary>
+      ///   Send bytes to given address. This is a non blocking method.
+      /// </summary>
+      /// <param name="address">
+      ///   Address to send bytes to
+      /// </param>
+      /// <param name="bytes">
+      ///   Bytes to be sent
+      /// </param>
+      /// <param name="acknowledge">
+      ///   Sets whether or not it is expected to receive an ack packet
+      /// </param>
+      public void SendTo(byte[] address, byte[] bytes, bool acknowledge = true)
+      {
+         // Chip enable low
+         IsEnabled = false;
 
-                Debug.Write("Retransmitting packet...");
-            }
-        }
+         // Setup PTX (Primary TX)
+         SetTransmitMode();
 
-        #endregion Public Members
+         // Write transmit address to TX_ADDR register. 
+         Execute(Commands.W_REGISTER, Registers.TX_ADDR, address);
 
-        #region Private Data
+         // Write transmit address to RX_ADDRESS_P0 (Pipe0) (For Auto ACK)
+         Execute(Commands.W_REGISTER, Registers.RX_ADDR_P0, address);
 
-        private byte[] _slot0Address;
-        private GpioPin _cePin;
-        private GpioPin _irqPin;
-        private SpiDevice _spiPort;
-        private bool _enabled;
-        private readonly ManualResetEvent _transmitSuccessFlag;
-        private readonly ManualResetEvent _transmitFailedFlag;
-        private const byte MAX_CHANNEL = 127;
+         // Send payload
+         Execute(acknowledge ? Commands.W_TX_PAYLOAD : Commands.W_TX_PAYLOAD_NO_ACK, 0x00, bytes);
 
-        #endregion Private Data
+         // Pulse for CE -> starts the transmission.
+         IsEnabled = true;
+      }
 
-        #region Private Helpers
+      /// <summary>
+      ///   Sends bytes to given address. This is a blocking method that returns true if data was
+      ///   received by the recipient or false if timeout occured.
+      /// </summary>
+      /// <param name="address">
+      ///   Address to send bytes to
+      /// </param>
+      /// <param name="bytes">
+      ///   Bytes to be sent
+      /// </param>
+      /// <param name="timeout">
+      ///   Timeout in milliseconds
+      /// </param>
+      /// <returns>true if data was received by the recipient, false otherwise</returns>
+      public bool SendTo(byte[] address, byte[] bytes, int timeout)
+      {
+         var startTime = DateTime.Now;
 
-        private void SetTransmitMode()
-        {
-            Execute(Commands.W_REGISTER, Registers.CONFIG,
-                    new[]
-                        {
+         while (true)
+         {
+            _transmitSuccessFlag.Reset();
+            _transmitFailedFlag.Reset();
+
+            SendTo(address, bytes);
+
+            if (WaitHandle.WaitAny(new[] { _transmitSuccessFlag, _transmitFailedFlag }, 200) == 0)
+               return true;
+
+            if (DateTime.Now.CompareTo(startTime.AddMilliseconds(timeout)) > 0)
+               return false;
+
+            Debug.Write("Retransmitting packet...");
+         }
+      }
+
+      #endregion Public Members
+
+      #region Private Data
+
+      private byte[] _slot0Address;
+      private IDigitalOutputPort _cePin;
+      private IDigitalOutputPort _csPin;
+      private IDigitalInterruptPort _irqPin;
+      private ISpiBus _SpiBus;
+      private bool _enabled;
+      private readonly ManualResetEvent _transmitSuccessFlag;
+      private readonly ManualResetEvent _transmitFailedFlag;
+      private const byte MAX_CHANNEL = 127;
+
+      #endregion Private Data
+
+      #region Private Helpers
+
+      private void SetTransmitMode()
+      {
+         Execute(Commands.W_REGISTER, Registers.CONFIG,
+                 new[]
+                     {
                             (byte) (1 << Bits.PWR_UP |
                                     1 << Bits.CRCO)
-                        });
-        }
+                     });
+      }
 
-        private void SetReceiveMode()
-        {
-            Execute(Commands.W_REGISTER, Registers.RX_ADDR_P0, _slot0Address);
+      private void SetReceiveMode()
+      {
+         Execute(Commands.W_REGISTER, Registers.RX_ADDR_P0, _slot0Address);
 
-            Execute(Commands.W_REGISTER, Registers.CONFIG,
-                    new[]
-                        {
+         Execute(Commands.W_REGISTER, Registers.CONFIG,
+                 new[]
+                     {
                             (byte) (1 << Bits.PWR_UP |
                                     1 << Bits.CRCO |
                                     1 << Bits.PRIM_RX)
-                        });
-        }
+                     });
+      }
 
-        private void CheckIsInitialized()
-        {
-            if (!IsInitialized)
-            {
-                throw new InvalidOperationException("Initialize method needs to be called before this call");
-            }
-        }
+      private void CheckIsInitialized()
+      {
+         if (!IsInitialized)
+         {
+            throw new InvalidOperationException("Initialize method needs to be called before this call");
+         }
+      }
 
-        private void FlushReceiveBuffer()
-        {
-            // Flush RX FIFO
-            Execute(Commands.FLUSH_RX, 0x00, new byte[0]);
-        }
+      private void FlushReceiveBuffer()
+      {
+         // Flush RX FIFO
+         Execute(Commands.FLUSH_RX, 0x00, new byte[0]);
+      }
 
-        private void FlushTransferBuffer()
-        {
-            // Flush TX FIFO 
-            Execute(Commands.FLUSH_TX, 0x00, new byte[0]);
-        }
+      private void FlushTransferBuffer()
+      {
+         // Flush TX FIFO 
+         Execute(Commands.FLUSH_TX, 0x00, new byte[0]);
+      }
 
-        private void ClearIrqMasks()
-        {
-            // Clear IRQ Masks
-            Execute(Commands.W_REGISTER, Registers.STATUS,
-                    new[]
-                        {
+      private void ClearIrqMasks()
+      {
+         // Clear IRQ Masks
+         Execute(Commands.W_REGISTER, Registers.STATUS,
+                 new[]
+                     {
                             (byte) (1 << Bits.MASK_RX_DR |
                                     1 << Bits.MASK_TX_DS |
                                     1 << Bits.MAX_RT)
-                        });
-        }
+                     });
+      }
 
-        private void _irqPin_ValueChanged(GpioPin sender, GpioPinValueChangedEventArgs args)
-        {
-            Debug.WriteLine("Interrupt Triggered: " + args.Edge.ToString());
+      private void InterruptGpioPin_ValueChanged(object sender, DigitalInputPortEventArgs args)
+      {
+         //TODO - Debug.WriteLine
+         //Console.WriteLine("Interrupt Triggered: " + args.Value.ToString());
 
-            if (args.Edge == GpioPinEdge.FallingEdge)
+         if (!IsInitialized)
+            return;
+
+         if (!_enabled)
+         {
+            FlushReceiveBuffer();
+            FlushTransferBuffer();
+            return;
+         }
+
+         // Disable RX/TX
+         IsEnabled = false;
+
+         // Set PRX
+         SetReceiveMode();
+
+         // there are 3 rx pipes in rf module so 3 arrays should be enough to store incoming data
+         // sometimes though more than 3 data packets are received somehow
+         var payloads = new byte[6][];
+
+         var status = GetStatus();
+         byte payloadCount = 0;
+         var payloadCorrupted = false;
+
+         if (status.DataReady)
+         {
+            while (!status.RxEmpty)
             {
-                if (!IsInitialized)
-                    return;
+               // Read payload size
+               var payloadLength = Execute(Commands.R_RX_PL_WID, 0x00, new byte[1]);
 
-                if (!_enabled)
-                {
-                    FlushReceiveBuffer();
-                    FlushTransferBuffer();
-                    return;
-                }
+               // this indicates corrupted data
+               if (payloadLength[1] > 32)
+               {
+                  payloadCorrupted = true;
 
-                // Disable RX/TX
-                IsEnabled = false;
+                  // Flush anything that remains in buffer
+                  FlushReceiveBuffer();
+               }
+               else
+               {
+                  if (payloadCount >= payloads.Length)
+                  {
+                     // TODO Debug.WriteLine
+                     Console.WriteLine("Unexpected payloadCount value = " + payloadCount);
+                     FlushReceiveBuffer();
+                  }
+                  else
+                  {
+                     // Read payload data
+                     payloads[payloadCount] = Execute(Commands.R_RX_PAYLOAD, 0x00, new byte[payloadLength[1]]);
+                     payloadCount++;
+                  }
+               }
 
-                // Set PRX
-                SetReceiveMode();
-
-                // there are 3 rx pipes in rf module so 3 arrays should be enough to store incoming data
-                // sometimes though more than 3 data packets are received somehow
-                var payloads = new byte[6][];
-
-                var status = GetStatus();
-                byte payloadCount = 0;
-                var payloadCorrupted = false;
-
-                if (status.DataReady)
-                {
-                    while (!status.RxEmpty)
-                    {
-                        // Read payload size
-                        var payloadLength = Execute(Commands.R_RX_PL_WID, 0x00, new byte[1]);
-
-                        // this indicates corrupted data
-                        if (payloadLength[1] > 32)
-                        {
-                            payloadCorrupted = true;
-
-                            // Flush anything that remains in buffer
-                            FlushReceiveBuffer();
-                        }
-                        else
-                        {
-                            if (payloadCount >= payloads.Length)
-                            {
-                                Debug.WriteLine("Unexpected payloadCount value = " + payloadCount);
-                                FlushReceiveBuffer();
-                            }
-                            else
-                            {
-                                // Read payload data
-                                payloads[payloadCount] = Execute(Commands.R_RX_PAYLOAD, 0x00, new byte[payloadLength[1]]);
-                                payloadCount++;
-                            }
-                        }
-
-                        // Clear RX_DR bit 
-                        var result = Execute(Commands.W_REGISTER, Registers.STATUS, new[] { (byte)(1 << Bits.RX_DR) });
-                        status.Update(result[0]);
-                    }
-                }
-
-                if (status.ResendLimitReached)
-                {
-                    FlushTransferBuffer();
-
-                    // Clear MAX_RT bit in status register
-                    Execute(Commands.W_REGISTER, Registers.STATUS, new[] { (byte)(1 << Bits.MAX_RT) });
-                }
-
-                if (status.TxFull)
-                {
-                    FlushTransferBuffer();
-                }
-
-                if (status.DataSent)
-                {
-                    // Clear TX_DS bit in status register
-                    Execute(Commands.W_REGISTER, Registers.STATUS, new[] { (byte)(1 << Bits.TX_DS) });
-                    Debug.WriteLine("Data Sent!");
-                }
-
-                // Enable RX
-                IsEnabled = true;
-
-                if (payloadCorrupted)
-                {
-                    Debug.WriteLine("Corrupted data received");
-                }
-                else if (payloadCount > 0)
-                {
-                    if (payloadCount > payloads.Length)
-                        Debug.WriteLine("Unexpected payloadCount value = " + payloadCount);
-
-                    for (var i = 0; i < System.Math.Min(payloadCount, payloads.Length); i++)
-                    {
-                        var payload = payloads[i];
-                        var payloadWithoutCommand = new byte[payload.Length - 1];
-                        Array.Copy(payload, 1, payloadWithoutCommand, 0, payload.Length - 1);
-                        OnDataReceived(payloadWithoutCommand);
-                    }
-                }
-                else if (status.DataSent)
-                {
-                    _transmitSuccessFlag.Set();
-                    OnTransmitSuccess();
-                }
-                else
-                {
-                    _transmitFailedFlag.Set();
-                    OnTransmitFailed();
-                }
+               // Clear RX_DR bit 
+               var result = Execute(Commands.W_REGISTER, Registers.STATUS, new[] { (byte)(1 << Bits.RX_DR) });
+               status.Update(result[0]);
             }
-        }
+         }
 
-        #endregion Private Helpers
-    }
+         if (status.ResendLimitReached)
+         {
+            FlushTransferBuffer();
+
+            // Clear MAX_RT bit in status register
+            Execute(Commands.W_REGISTER, Registers.STATUS, new[] { (byte)(1 << Bits.MAX_RT) });
+         }
+
+         if (status.TxFull)
+         {
+            FlushTransferBuffer();
+         }
+
+         if (status.DataSent)
+         {
+            // Clear TX_DS bit in status register
+            Execute(Commands.W_REGISTER, Registers.STATUS, new[] { (byte)(1 << Bits.TX_DS) });
+            // TODO Debug.WriteLine("Data Sent!");
+            Console.WriteLine("Data Sent!");
+         }
+
+         // Enable RX
+         IsEnabled = true;
+
+         if (payloadCorrupted)
+         {
+            // TODO Debug.WriteLine("Corrupted data received");
+            Console.WriteLine("Corrupted data received");
+         }
+         else if (payloadCount > 0)
+         {
+            if (payloadCount > payloads.Length)
+               // TODO Debug.WriteLine("Unexpected payloadCount value = " + payloadCount);
+               Console.WriteLine("Unexpected payloadCount value = " + payloadCount);
+
+            for (var i = 0; i < System.Math.Min(payloadCount, payloads.Length); i++)
+            {
+               var payload = payloads[i];
+               var payloadWithoutCommand = new byte[payload.Length - 1];
+               Array.Copy(payload, 1, payloadWithoutCommand, 0, payload.Length - 1);
+               OnDataReceived(payloadWithoutCommand);
+            }
+         }
+         else if (status.DataSent)
+         {
+            _transmitSuccessFlag.Set();
+            OnTransmitSuccess();
+         }
+         else
+         {
+            _transmitFailedFlag.Set();
+            OnTransmitFailed();
+         }
+      }
+
+      #endregion Private Helpers
+   }
 }
