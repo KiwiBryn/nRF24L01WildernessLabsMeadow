@@ -1,46 +1,57 @@
-﻿using System;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-using Meadow;
-using Meadow.Devices;
-using Meadow.Foundation;
-using Meadow.Foundation.Leds;
-using Meadow.Hardware;
-using Radios.RF24;
-
-namespace nRF24DeviceClient
+﻿//---------------------------------------------------------------------------------
+// Copyright (c) March 2020, devMobile Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+//---------------------------------------------------------------------------------
+namespace devMobile.IoT.FieldGateway.nRF24Client
 {
-   public class MeadowApp : App<F7Micro, MeadowApp>
+	using System;
+	using System.Text;
+	using System.Threading.Tasks;
+
+	using Meadow;
+	using Meadow.Devices;
+	using Meadow.Hardware;
+
+	using Radios.RF24;
+
+	public class MeadowApp : App<F7Micro, MeadowApp>
    {
-		private const string BaseStationAddress = "Node2";
+		private const string BaseStationAddress = "Base1";
 		private const string DeviceAddress = "Dev01";
-		private const byte nRF24Channel = 20;
+		private const byte nRF24Channel = 15;
 		private RF24 Radio = new RF24();
 
 		public MeadowApp()
       {
 			try
 			{
-								var config = new Meadow.Hardware.SpiClockConfiguration(
-												2000,
-												Meadow.Hardware.SpiClockConfiguration.Mode.Mode0);
+				var config = new Meadow.Hardware.SpiClockConfiguration(
+					2000,
+					SpiClockConfiguration.Mode.Mode0);
 
-								ISpiBus spiBus = Device.CreateSpiBus(Device.Pins.SCK,
-									 Device.Pins.MOSI,
-									 Device.Pins.MISO,
-									 config);
-
-				//ISpiBus spiBus = Device.CreateSpiBus();
+				ISpiBus spiBus = Device.CreateSpiBus(
+					Device.Pins.SCK,
+					Device.Pins.MOSI,
+					Device.Pins.MISO,config);
 
 				Radio.OnDataReceived += Radio_OnDataReceived;
 				Radio.OnTransmitFailed += Radio_OnTransmitFailed;
 				Radio.OnTransmitSuccess += Radio_OnTransmitSuccess;
 
 				Radio.Initialize(Device, spiBus, Device.Pins.D09, Device.Pins.D10, Device.Pins.D11);
-				Console.WriteLine("---Address write: " + BaseStationAddress);
-				Radio.Address = Encoding.UTF8.GetBytes(BaseStationAddress);
-				Console.WriteLine("---Address read: " + Encoding.UTF8.GetString(Radio.Address));
+				Radio.Address = Encoding.UTF8.GetBytes(DeviceAddress);
 
 				Radio.Channel = nRF24Channel;
 				Radio.PowerLevel = PowerLevel.High;
@@ -72,7 +83,7 @@ namespace nRF24DeviceClient
 			{
 				string payload = "hello " + DateTime.Now.Second;
 				Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-TX {payload.Length} byte message {payload}");
-				Radio.SendTo(Encoding.UTF8.GetBytes(DeviceAddress), Encoding.UTF8.GetBytes(payload));
+				Radio.SendTo(Encoding.UTF8.GetBytes(BaseStationAddress), Encoding.UTF8.GetBytes(payload));
 
 				Task.Delay(30000).Wait();
 			}
@@ -85,7 +96,7 @@ namespace nRF24DeviceClient
 			Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-RX Unicode Length {0} Unicode Length {1} Unicode text {2}", data.Length, unicodeText.Length, unicodeText);
 
 			// display as hex
-			Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-RX Hex Length {0} Payload {1}", data.Length, BitConverter.ToString(data));
+			Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-RX Hex Length {data.Length} Payload {BitConverter.ToString(data)}");
 		}
 
 		private void Radio_OnTransmitSuccess()
@@ -95,7 +106,7 @@ namespace nRF24DeviceClient
 
 		private void Radio_OnTransmitFailed()
 		{
-			Console.WriteLine("Transmit Failed!");
+			Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-TX failed!");
 		}
 	}
 }
