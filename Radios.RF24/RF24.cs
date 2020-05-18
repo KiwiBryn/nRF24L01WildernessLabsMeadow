@@ -23,7 +23,7 @@
       ///   Event Handler for when data is received
       /// </summary>
       /// <param name="data"></param>
-      public delegate void OnDataRecievedHandler(byte[] data);
+      public delegate void OnDataReceivedHandler(byte[] data);
 
       #endregion Delegates
 
@@ -32,7 +32,7 @@
       /// <summary>
       ///   Occurs when data packet has been received
       /// </summary>
-      public event OnDataRecievedHandler OnDataReceived = delegate { };
+      public event OnDataReceivedHandler OnDataReceived = delegate { };
 
       /// <summary>
       ///   Occurs when ack has been received for send packet
@@ -263,20 +263,20 @@
       {
          get
          {
-            var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1] & 0xF8;
-            var newValue = (regValue - 1) >> 1;
+            byte regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1];
+            var newValue = (regValue & 0x06) >> 1;
             return (PowerLevel)newValue;
          }
          set
          {
-            var regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1] & 0xF8;
+            byte regValue = Execute(Commands.R_REGISTER, Registers.RF_SETUP, new byte[1])[1] &=(byte)0xF8;
 
-            byte newValue = (byte)((byte)value << 1 + 1);
+            regValue |= (byte)((byte)value << 1);
 
             Execute(Commands.W_REGISTER, Registers.RF_SETUP,
                     new[]
                         {
-                            (byte) (newValue | regValue)
+                            (byte)regValue
                         });
          }
       }
@@ -641,8 +641,7 @@
 
       private void InterruptGpioPin_ValueChanged(object sender, DigitalInputPortEventArgs args)
       {
-         //TODO - Debug.WriteLine
-         //Console.WriteLine("Interrupt Triggered: " + args.Value.ToString());
+         //Debug.WriteLine("Interrupt Triggered: " + args.Value.ToString());
 
          if (!IsInitialized)
             return;
