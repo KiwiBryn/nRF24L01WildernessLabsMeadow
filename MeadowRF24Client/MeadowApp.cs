@@ -37,30 +37,20 @@ namespace devMobile.IoT.FieldGateway.nRF24Client
       {
          try
          {
-            var config = new Meadow.Hardware.SpiClockConfiguration(
-                2000,
-                SpiClockConfiguration.Mode.Mode0);
+            var config = new Meadow.Hardware.SpiClockConfiguration(2000, SpiClockConfiguration.Mode.Mode0);
 
-            ISpiBus spiBus = Device.CreateSpiBus(
-                Device.Pins.SCK,
-                Device.Pins.MOSI,
-                Device.Pins.MISO,config);
+            ISpiBus spiBus = Device.CreateSpiBus( Device.Pins.SCK, Device.Pins.MOSI, Device.Pins.MISO, config);
 
             Radio.OnDataReceived += Radio_OnDataReceived;
             Radio.OnTransmitFailed += Radio_OnTransmitFailed;
             Radio.OnTransmitSuccess += Radio_OnTransmitSuccess;
 
             Radio.Initialize(Device, spiBus, Device.Pins.D09, Device.Pins.D10, Device.Pins.D11);
-            Radio.Address = Encoding.UTF8.GetBytes(DeviceAddress);
 
+            Radio.Address = Encoding.UTF8.GetBytes(DeviceAddress);
             Radio.Channel = nRF24Channel;
-            //Radio.PowerLevel = PowerLevel.Max;
             Radio.PowerLevel = PowerLevel.High;
-            //Radio.PowerLevel = PowerLevel.Low;
-            //Radio.PowerLevel = PowerLevel.Minimum;
             Radio.DataRate = DataRate.DR250Kbps;
-            //Radio.DataRate = DataRate.DR1Mbps;
-            //Radio.DataRate = DataRate.DR2Mbps
             Radio.IsEnabled = true;
             Radio.IsAutoAcknowledge = true;
             Radio.IsDyanmicAcknowledge = false;
@@ -77,6 +67,16 @@ namespace devMobile.IoT.FieldGateway.nRF24Client
             Console.WriteLine($"IsDynamicPayload: {Radio.IsDynamicPayload}");
             Console.WriteLine($"IsInitialized: {Radio.IsInitialized}");
             Console.WriteLine($"IsPowered: {Radio.IsPowered}");
+
+            while (true)
+            {
+               string payload = "hello " + DateTime.Now.ToShortTimeString();
+               Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-TX {payload.Length} byte message {payload}");
+
+               Radio.SendTo(Encoding.UTF8.GetBytes(BaseStationAddress), Encoding.UTF8.GetBytes(payload));
+
+               Task.Delay(10000).Wait();
+            }
          }
          catch (Exception ex)
          {
@@ -84,25 +84,6 @@ namespace devMobile.IoT.FieldGateway.nRF24Client
 
             return;
          }
-
-         while (true)
-         {
-            string payload = "hello " + DateTime.Now.Second;
-            Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-TX {payload.Length} byte message {payload}");
-            Radio.SendTo(Encoding.UTF8.GetBytes(BaseStationAddress), Encoding.UTF8.GetBytes(payload));
-
-            Task.Delay(30000).Wait();
-         }
-      }
-
-      private void Radio_OnDataReceived(byte[] data)
-      {
-         // Display as Unicode
-         string unicodeText = Encoding.UTF8.GetString(data);
-         Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-RX Data Length {data.Length} Unicode Length {unicodeText.Length} Unicode text {unicodeText}");
-
-         // display as hex
-         Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-RX Hex Length {data.Length} Payload {BitConverter.ToString(data)}");
       }
 
       private void Radio_OnTransmitSuccess()
@@ -113,6 +94,16 @@ namespace devMobile.IoT.FieldGateway.nRF24Client
       private void Radio_OnTransmitFailed()
       {
          Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-TX failed!");
+      }
+
+      private void Radio_OnDataReceived(byte[] data)
+      {
+         // Display as Unicode
+         string unicodeText = Encoding.UTF8.GetString(data);
+         Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-RX Data Length {data.Length} Unicode Length {unicodeText.Length} Unicode text {unicodeText}");
+
+         // display as hex
+         Console.WriteLine($"{DateTime.UtcNow:HH:mm:ss}-RX Hex Length {data.Length} Payload {BitConverter.ToString(data)}");
       }
    }
 }

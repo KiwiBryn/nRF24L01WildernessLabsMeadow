@@ -722,7 +722,7 @@
             // Clear TX_DS bit in status register
             Execute(Commands.W_REGISTER, Registers.STATUS, new[] { (byte)(1 << Bits.TX_DS) });
             // TODO Debug.WriteLine("Data Sent!");
-            Console.WriteLine("Data Sent!");
+            //Console.WriteLine("Data Sent!");
          }
 
          // Enable RX
